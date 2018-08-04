@@ -1,0 +1,147 @@
+
+我们在使用laravel来写API时，经常需要返回一个json字符串或JsonResponse，通常我们的做法可能有两种。
+
+1、在BaseController中定义一个返回Json响应de方法，然后继承该BaseController。如：
+
+//BaseController.php
+
+public function json($data = null, $status = 200, $headers = [], $options = 0)
+{
+    return new JsonResponse($data, $status, $headers, $options);
+}
+
+//YourController.php
+class YourController extends BaseController
+{
+    public function users(UserRepository $userRepository)
+    {
+        return $this->json($userRepository->allUser());
+    }
+}
+然而这写法确实挺方便，然而当你在其他地方需要使用到Json响应时（如中间件验证失败时你想要返回一个Json响应）。你无法使用到$this->json(...)。
+
+2、直接在需要用到Json响应得地方使用return new JsonResponse或者使用Response Facade。
+
+但这种做法当需要修改Response响应时得全部改动，不可取。
+
+Response 宏
+Laravel提供了一个非常方便的响应宏来处理这一情况
+
+首先，我们需要先注册一个响应宏，在任意一个ServiceProvider的boot方法里（ResponseMacroServiceProvider ），使用Response Facade注册
+
+
+Response::macro('success', function ($data = [], $message = 'success') {
+    return new JsonResponse([
+        'code' => 0,
+        'data' => $data,
+        'message' => $message
+    ], 200);
+});
+接下来， 你可以再任何地方使用它response()。
+
+//UserController.php
+
+public function users(UserRepository $userRepository)
+{
+    return response()->success($userRepository->all(), 'success');
+}
+注意，你只能通过response()这个全局方法或是app('Illuminate\Routing\ResponseFactory')来使用它
+
+response()->success();//OK
+app('Illuminate\Routing\ResponseFactory')->success();//OK
+
+//Response Facade
+Response::success();//ok
+
+(new \Illuminate\Http\Response)->success();//Error
+原理
+我们在ServiceProvider里使用Response Facade来注册的success宏，我们先看看Response这个Facade的正真类是什么。
+
+// Illuminate\Support\Facades.php
+
+protected static function getFacadeAccessor()
+{
+    return 'Illuminate\Contracts\Routing\ResponseFactory';
+}
+该Facade返回了一个ResponseFactory接口，那该接口的具体实列对象时什么呢。
+
+//Illuminate\Routing\RoutingServiceProvider.php
+
+/**
+ * Register the response factory implementation.
+ *
+ * @return void
+ */
+protected function registerResponseFactory()
+{
+    $this->app->singleton('Illuminate\Contracts\Routing\ResponseFactory', function ($app) {
+        return new ResponseFactory($app['Illuminate\Contracts\View\Factory'], $app['redirect']);
+    });
+}
+可以看到，该RoutingServiceProvider注册了一个Illuminate\Routing\ResponseFactory的实列给Response Facade。
+
+我们在Illuminate\Routing\ResponseFactory的源码中可以看到，它引用了一个Illuminate\Support\Traits\Macroable trait。
+
+namespace Illuminate\Routing;
+
+use Illuminate\Support\Traits\Macroable;
+
+class ResponseFactory implements FactoryContract
+{
+    use Macroable;
+}
+该Trait源码如下，看完源码就知道为什么调用response()就能正常访问success方法了。
+
+trait Macroable
+{
+    protected static $macros = [];
+
+    public static function macro($name, callable $macro)
+    {
+        static::$macros[$name] = $macro;
+    }
+
+    public static function hasMacro($name)
+    {
+        return isset(static::$macros[$name]);
+    }
+
+    public static function __callStatic($method, $parameters)
+    {
+        if (! static::hasMacro($method)) {
+            throw new BadMethodCallException("Method {$method} does not exist.");
+        }
+        if (static::$macros[$method] instanceof Closure) {
+            return call_user_func_array(Closure::bind(static::$macros[$method], null, static::class), $parameters);
+        }
+        return call_user_func_array(static::$macros[$method], $parameters);
+    }
+
+    public function __call($method, $parameters)
+    {
+        if (! static::hasMacro($method)) {
+            throw new BadMethodCallException("Method {$method} does not exist.");
+        }
+        if (static::$macros[$method] instanceof Closure) {
+            return call_user_func_array(static::$macros[$method]->bindTo($this, static::class), $parameters);
+        }
+        return call_user_func_array(static::$macros[$method], $parameters);
+    }
+}
+其实该trait Illuminate\Support\Traits\Macroable在很多地方都有使用，包括FileSystem、Database-Builder。
+
+Response-macros文档---Laravel-China
+发布于 2017年07月03日
+著作权归作者所有
+文章收录于专栏
+ 
+二楞徐
+二楞徐的闲谈杂鱼
+写评论
+推荐阅读
+分析Laravel队列实现原理解决问题记录
+Dr點燃 · 9 收藏
+Laravel5.4重新登陆跳转到登陆前页面的原理和实现
+Donng · 5 收藏
+laravel 如何添加自定义帮助函数
+风吹枫落van · 4
